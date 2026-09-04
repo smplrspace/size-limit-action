@@ -31,6 +31,17 @@ inputs:
   package_manager:
     required: false
     description: "The package manager used to run the build and install commands. If not provided, the manager will be auto detected. Example values: `yarn`, `npm`, `pnpm`, `bun`."
+  use_artifacts:
+    required: false
+    default: false
+    description: "read the base branch results from a workflow artifact instead of building the base branch. Requires a run of this action on the main branch to produce that artifact, and `actions: read` permission. Falls back to building the base branch when no artifact is available."
+  main_branch:
+    required: false
+    description: "the branch that produces the results artifact. Defaults to the repository default branch. Only used when `use_artifacts` is enabled."
+  artifact_name:
+    required: false
+    default: "size-limit-results"
+    description: "the name of the workflow artifact holding the base branch results. Only used when `use_artifacts` is enabled, and only needs changing when a repository runs this action more than once."
 runs:
   using: 'node20'
   main: 'dist/index.js'

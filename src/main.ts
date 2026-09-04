@@ -4,6 +4,7 @@ import { context, GitHub } from "@actions/github";
 import table from "markdown-table";
 import Term from "./Term";
 import SizeLimit from "./SizeLimit";
+import { fetchBaseResults, uploadResults } from "./Artifacts";
 
 const SIZE_LIMIT_HEADING = `## size-limit report 📦 `;
 
@@ -33,12 +34,6 @@ async function run() {
     const { payload, repo } = context;
     const pr = payload.pull_request;
 
-    if (!pr) {
-      throw new Error(
-        "No PR found. Only pull_request workflows are supported."
-      );
-    }
-
     const token = getInput("github_token");
     const skipStep = getInput("skip_step");
     const buildScript = getInput("build_script");
@@ -48,6 +43,22 @@ async function run() {
     const directory = getInput("directory") || process.cwd();
     const windowsVerbatimArguments =
       getInput("windows_verbatim_arguments") === "true" ? true : false;
+    const useArtifacts = getInput("use_artifacts") === "true";
+    const artifactName = getInput("artifact_name");
+    const mainBranch =
+      getInput("main_branch") ||
+      (payload.repository && payload.repository.default_branch) ||
+      "main";
+    const isMainBranch = !pr && context.ref === `refs/heads/${mainBranch}`;
+
+    if (!pr && !(useArtifacts && isMainBranch)) {
+      throw new Error(
+        useArtifacts
+          ? `No PR found, and ${context.ref} is not the ${mainBranch} branch. Only pull_request workflows and ${mainBranch} branch runs are supported.`
+          : "No PR found. Only pull_request workflows are supported."
+      );
+    }
+
     const octokit = new GitHub(token);
     const term = new Term();
     const limit = new SizeLimit();
@@ -62,16 +73,44 @@ async function run() {
       script,
       packageManager
     );
-    const { output: baseOutput } = await term.execSizeLimit(
-      pr.base.ref,
-      null,
-      buildScript,
-      cleanScript,
-      windowsVerbatimArguments,
-      directory,
-      script,
-      packageManager
-    );
+
+    // On the main branch there is nothing to compare against and no PR to
+    // comment on: the whole point of the run is to leave the results behind for
+    // the pull requests that will branch off it.
+    if (isMainBranch) {
+      try {
+        limit.parseResults(output);
+      } catch (error) {
+        console.log(
+          "Error parsing size-limit output. The output should be a json."
+        );
+        throw error;
+      }
+
+      await uploadResults(artifactName, output);
+
+      if (status > 0) {
+        setFailed("Size limit has been exceeded.");
+      }
+      return;
+    }
+
+    let baseOutput = useArtifacts
+      ? await fetchBaseResults(octokit, repo, token, artifactName, mainBranch)
+      : null;
+
+    if (baseOutput === null) {
+      ({ output: baseOutput } = await term.execSizeLimit(
+        pr.base.ref,
+        null,
+        buildScript,
+        cleanScript,
+        windowsVerbatimArguments,
+        directory,
+        script,
+        packageManager
+      ));
+    }
 
     let base;
     let current;
@@ -129,4 +168,8 @@ async function run() {
   }
 }
 
-run();
+// Guarded so this file can be `import`-ed (e.g. from tests) without kicking off a run;
+// the action itself is always invoked as the entrypoint, so behaviour is unchanged.
+if (require.main === module) {
+  run();
+}
