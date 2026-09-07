@@ -115,14 +115,7 @@ with:
 
 ### Skipping the base branch build
 
-By default the action builds and runs `size-limit` twice per pull request: once for the
-head, once for the base branch, so it can show the delta. The base build can be skipped by
-enabling `use_artifacts` and also running the action on pushes to your main branch. On the
-main branch the action stores its `size-limit` results as a workflow artifact instead of
-posting a comment; pull requests then read that artifact back instead of rebuilding the
-base branch. The first run after enabling this (or after 90 days without a run on the main
-branch, since that is the longest artifacts are ever retained) has no artifact to read yet,
-so the action falls back to building the base branch as before.
+By default the action builds and runs `size-limit` twice per pull request: once for the head, once for the base branch, so it can show the delta. The base build can be skipped by enabling `use_artifacts` and also running the action on pushes to your main branch. On the main branch the action stores its `size-limit` results as a workflow artifact instead of posting a comment; pull requests then read that artifact back instead of rebuilding the base branch. The first run after enabling this (or after 90 days without a run on the main branch, since that is the longest artifacts are ever retained) has no artifact to read yet, so the action falls back to building the base branch as before.
 
 ```yaml
 # on your main branch workflow
@@ -136,11 +129,7 @@ with:
   use_artifacts: true
 ```
 
-`main_branch` defaults to the repository's default branch, and only needs setting if the
-results should come from a different branch. `artifact_name` defaults to
-`size-limit-results`, and only needs setting if this action runs more than once in the same
-repository (for example against two different subdirectories) and each run needs its own
-artifact.
+`main_branch` defaults to the repository's default branch, and only needs setting if the results should come from a different branch. `artifact_name` defaults to `size-limit-results`, and only needs setting if this action runs more than once in the same repository (for example against two different subdirectories) and each run needs its own artifact.
 
 ## Feedback
 
