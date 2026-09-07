@@ -122,6 +122,7 @@ The main branch run itself avoids rebuilding too, whenever it safely can. When a
 ```yaml
 # on your main branch workflow
 permissions:
+  contents: read # to checkout, and to git fetch/diff the merged pull request's head commit
   actions: read # to read and reuse a merged pull request's own results
   pull-requests: read # to find the pull request behind a merge commit
 with:
@@ -130,6 +131,7 @@ with:
 
 # on your pull_request workflow
 permissions:
+  contents: read # to checkout, and to git fetch/diff the base branch
   pull-requests: write # to post the comment
   actions: read # to read the main branch's results
 with:

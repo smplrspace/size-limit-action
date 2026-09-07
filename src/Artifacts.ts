@@ -152,7 +152,14 @@ export async function findMergedPullRequest(
         candidate.merged_at && candidate.merge_commit_sha === sha
     );
 
-    return pr ? { number: pr.number, headSha: pr.head.sha } : null;
+    if (!pr) {
+      console.log(
+        `${sha} is not the merge of a pull request (a direct push, or a merge strategy that doesn't produce this exact sha), building instead of reusing.`
+      );
+      return null;
+    }
+
+    return { number: pr.number, headSha: pr.head.sha };
   } catch (error) {
     console.log(
       "Could not look up the pull request behind this commit.",

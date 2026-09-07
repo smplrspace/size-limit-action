@@ -122316,7 +122316,11 @@ function findMergedPullRequest(octokit, repo, sha) {
         try {
             const { data } = yield octokit.request("GET /repos/:owner/:repo/commits/:ref/pulls", Object.assign(Object.assign({}, repo), { ref: sha }));
             const pr = data.find((candidate) => candidate.merged_at && candidate.merge_commit_sha === sha);
-            return pr ? { number: pr.number, headSha: pr.head.sha } : null;
+            if (!pr) {
+                console.log(`${sha} is not the merge of a pull request (a direct push, or a merge strategy that doesn't produce this exact sha), building instead of reusing.`);
+                return null;
+            }
+            return { number: pr.number, headSha: pr.head.sha };
         }
         catch (error) {
             console.log("Could not look up the pull request behind this commit.", error.message);
