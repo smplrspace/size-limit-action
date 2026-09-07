@@ -117,13 +117,21 @@ with:
 
 By default the action builds and runs `size-limit` twice per pull request: once for the head, once for the base branch, so it can show the delta. The base build can be skipped by enabling `use_artifacts` and also running the action on pushes to your main branch. On the main branch the action stores its `size-limit` results as a workflow artifact instead of posting a comment; pull requests then read that artifact back instead of rebuilding the base branch. The first run after enabling this (or after 90 days without a run on the main branch, since that is the longest artifacts are ever retained) has no artifact to read yet, so the action falls back to building the base branch as before.
 
+The main branch run itself avoids rebuilding too, whenever it safely can. When a pushed commit is the merge of a pull request that also ran this action with `use_artifacts` enabled, and nothing under `directory` changed on the main branch since that pull request's own build, its result is reused instead of building again. Any main branch push that isn't a pull request merge, or where something changed in between (another pull request merged first and touched the same files), falls back to a real build as before.
+
 ```yaml
 # on your main branch workflow
+permissions:
+  actions: read # to read and reuse a merged pull request's own results
+  pull-requests: read # to find the pull request behind a merge commit
 with:
   github_token: ${{ secrets.GITHUB_TOKEN }}
   use_artifacts: true
 
 # on your pull_request workflow
+permissions:
+  pull-requests: write # to post the comment
+  actions: read # to read the main branch's results
 with:
   github_token: ${{ secrets.GITHUB_TOKEN }}
   use_artifacts: true

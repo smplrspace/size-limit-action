@@ -34,7 +34,7 @@ inputs:
   use_artifacts:
     required: false
     default: false
-    description: "read the base branch results from a workflow artifact instead of building the base branch. Requires a run of this action on the main branch to produce that artifact, and `actions: read` permission. Falls back to building the base branch when no artifact is available."
+    description: "read the base branch results from a workflow artifact instead of building the base branch. Requires a run of this action on the main branch to produce that artifact, and `actions: read` permission. On the main branch, also reuses the merged pull request's own result instead of rebuilding when nothing relevant changed since; this additionally requires `pull-requests: read` permission on that workflow. Falls back to building the base branch, or to a full main branch build, when there is nothing usable to reuse."
   main_branch:
     required: false
     description: "the branch that produces the results artifact. Defaults to the repository default branch. Only used when `use_artifacts` is enabled."

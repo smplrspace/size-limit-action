@@ -4,7 +4,11 @@ import { context, GitHub } from "@actions/github";
 import table from "markdown-table";
 import Term from "./Term";
 import SizeLimit from "./SizeLimit";
-import { fetchBaseResults, uploadResults } from "./Artifacts";
+import {
+  fetchBaseResults,
+  reusePullRequestResult,
+  uploadResults
+} from "./Artifacts";
 
 const SIZE_LIMIT_HEADING = `## size-limit report 📦 `;
 
@@ -63,21 +67,53 @@ async function run() {
     const term = new Term();
     const limit = new SizeLimit();
 
-    const { status, output } = await term.execSizeLimit(
-      null,
-      skipStep,
-      buildScript,
-      cleanScript,
-      windowsVerbatimArguments,
-      directory,
-      script,
-      packageManager
-    );
-
     // On the main branch there is nothing to compare against and no PR to
     // comment on: the whole point of the run is to leave the results behind for
-    // the pull requests that will branch off it.
+    // the pull requests that will branch off it. If this commit is the merge of a
+    // pull request whose own build already covers this exact result, reuse it
+    // instead of rebuilding from scratch.
     if (isMainBranch) {
+      const reused = useArtifacts
+        ? await reusePullRequestResult(
+            octokit,
+            repo,
+            token,
+            artifactName,
+            context.sha,
+            directory
+          )
+        : null;
+
+      if (reused !== null) {
+        let results: Array<{ passed?: boolean }>;
+        try {
+          results = JSON.parse(reused);
+        } catch (error) {
+          console.log(
+            "Error parsing the reused size-limit output. The output should be a json."
+          );
+          throw error;
+        }
+
+        await uploadResults(artifactName, reused);
+
+        if (results.some(result => result.passed === false)) {
+          setFailed("Size limit has been exceeded.");
+        }
+        return;
+      }
+
+      const { status, output } = await term.execSizeLimit(
+        null,
+        skipStep,
+        buildScript,
+        cleanScript,
+        windowsVerbatimArguments,
+        directory,
+        script,
+        packageManager
+      );
+
       try {
         limit.parseResults(output);
       } catch (error) {
@@ -93,6 +129,23 @@ async function run() {
         setFailed("Size limit has been exceeded.");
       }
       return;
+    }
+
+    const { status, output } = await term.execSizeLimit(
+      null,
+      skipStep,
+      buildScript,
+      cleanScript,
+      windowsVerbatimArguments,
+      directory,
+      script,
+      packageManager
+    );
+
+    if (useArtifacts) {
+      // Stash this pull request's own result so that, if it merges, the main-branch
+      // run can reuse it instead of rebuilding an identical tree from scratch.
+      await uploadResults(artifactName, output);
     }
 
     let baseOutput = useArtifacts

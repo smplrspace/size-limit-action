@@ -122215,10 +122215,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.fetchBaseResults = exports.uploadResults = exports.RESULTS_FILE = void 0;
+exports.reusePullRequestResult = exports.changedSincePullRequest = exports.findMergedPullRequest = exports.fetchBaseResults = exports.uploadResults = exports.RESULTS_FILE = void 0;
 const path_1 = __importDefault(__nccwpck_require__(71017));
 const os_1 = __importDefault(__nccwpck_require__(22037));
 const fs_1 = __nccwpck_require__(57147);
+const exec_1 = __nccwpck_require__(71514);
 const artifact_1 = __nccwpck_require__(79450);
 // Kept out of main.ts so this module never pulls in @actions/core: @actions/artifact
 // forces @actions/core to a version whose OIDC support drags in undici, which this
@@ -122236,8 +122237,10 @@ function createTempDirectory() {
     });
 }
 /**
- * Stores the raw `size-limit` output of the current run as a workflow artifact,
- * for pull request runs to read instead of building the base branch themselves.
+ * Stores the raw `size-limit` output of the current run as a workflow artifact. Used
+ * both for the main-branch result future pull requests compare against, and for a pull
+ * request's own result, which a later merge of that same pull request can reuse instead
+ * of rebuilding.
  */
 function uploadResults(name, output) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -122250,6 +122253,35 @@ function uploadResults(name, output) {
 }
 exports.uploadResults = uploadResults;
 /**
+ * Finds the most recent non-expired artifact called `name` whose run matches `matches`.
+ */
+function findArtifact(octokit, repo, name, matches) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { data } = yield octokit.request("GET /repos/:owner/:repo/actions/artifacts", Object.assign(Object.assign({}, repo), { name, 
+            // eslint-disable-next-line camelcase
+            per_page: 100 }));
+        const candidates = data.artifacts
+            .filter((candidate) => !candidate.expired && candidate.workflow_run && matches(candidate))
+            .sort((a, b) => b.created_at.localeCompare(a.created_at));
+        return candidates.length === 0 ? null : candidates[0];
+    });
+}
+function downloadArtifact(artifact, token, repo) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const directory = yield createTempDirectory();
+        yield new artifact_1.DefaultArtifactClient().downloadArtifact(artifact.id, {
+            path: directory,
+            findBy: {
+                token,
+                workflowRunId: artifact.workflow_run.id,
+                repositoryOwner: repo.owner,
+                repositoryName: repo.repo
+            }
+        });
+        return fs_1.promises.readFile(path_1.default.join(directory, exports.RESULTS_FILE), "utf8");
+    });
+}
+/**
  * Reads back the most recent results artifact produced on the main branch.
  * Returns null whenever it cannot be used, so that the caller falls back to
  * building the base branch: there is nothing on the main branch yet, the
@@ -122259,31 +122291,14 @@ exports.uploadResults = uploadResults;
 function fetchBaseResults(octokit, repo, token, name, branch) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            const { data } = yield octokit.request("GET /repos/:owner/:repo/actions/artifacts", Object.assign(Object.assign({}, repo), { name, 
-                // eslint-disable-next-line camelcase
-                per_page: 100 }));
-            const candidates = data.artifacts
-                .filter((candidate) => !candidate.expired &&
-                candidate.workflow_run &&
-                candidate.workflow_run.head_branch === branch)
-                .sort((a, b) => b.created_at.localeCompare(a.created_at));
-            if (candidates.length === 0) {
+            const artifact = yield findArtifact(octokit, repo, name, candidate => candidate.workflow_run.head_branch === branch);
+            if (!artifact) {
                 console.log(`No "${name}" artifact available on ${branch}, building the base branch instead.`);
                 return null;
             }
-            const [artifact] = candidates;
-            const directory = yield createTempDirectory();
-            yield new artifact_1.DefaultArtifactClient().downloadArtifact(artifact.id, {
-                path: directory,
-                findBy: {
-                    token,
-                    workflowRunId: artifact.workflow_run.id,
-                    repositoryOwner: repo.owner,
-                    repositoryName: repo.repo
-                }
-            });
+            const content = yield downloadArtifact(artifact, token, repo);
             console.log(`Using the "${name}" artifact from ${branch} at ${artifact.workflow_run.head_sha}, skipping the base branch build.`);
-            return fs_1.promises.readFile(path_1.default.join(directory, exports.RESULTS_FILE), "utf8");
+            return content;
         }
         catch (error) {
             console.log(`Could not read the "${name}" artifact, building the base branch instead.`, error.message);
@@ -122292,6 +122307,82 @@ function fetchBaseResults(octokit, repo, token, name, branch) {
     });
 }
 exports.fetchBaseResults = fetchBaseResults;
+/**
+ * Finds the pull request whose merge produced `sha`, if any - a direct push to the main
+ * branch (not through a pull request) has none.
+ */
+function findMergedPullRequest(octokit, repo, sha) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { data } = yield octokit.request("GET /repos/:owner/:repo/commits/:ref/pulls", Object.assign(Object.assign({}, repo), { ref: sha }));
+            const pr = data.find((candidate) => candidate.merged_at && candidate.merge_commit_sha === sha);
+            return pr ? { number: pr.number, headSha: pr.head.sha } : null;
+        }
+        catch (error) {
+            console.log("Could not look up the pull request behind this commit.", error.message);
+            return null;
+        }
+    });
+}
+exports.findMergedPullRequest = findMergedPullRequest;
+/**
+ * True when `directory` differs between a pull request's own head commit and the
+ * resulting merge commit - i.e. something else landed on the main branch in between that
+ * touched the same build, so the pull request's own result can no longer be trusted.
+ * Relies on GitHub allowing a shallow fetch by exact commit SHA, which it does for
+ * github.com-hosted repositories.
+ */
+function changedSincePullRequest(headSha, sha, directory) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            yield exec_1.exec(`git fetch origin ${headSha} --depth=1`);
+        }
+        catch (error) {
+            console.log("Could not fetch the pull request's head commit, treating it as changed.", error.message);
+            return true;
+        }
+        const status = yield exec_1.exec("git", ["diff", "--quiet", headSha, sha, "--", directory], { ignoreReturnCode: true });
+        return status !== 0;
+    });
+}
+exports.changedSincePullRequest = changedSincePullRequest;
+/**
+ * Reuses the size-limit result the pull request behind `sha` already computed for its own
+ * head commit, when that result is still valid for the resulting main-branch tree. Returns
+ * null whenever it cannot be reused, so the caller falls back to a real build: `sha` was
+ * not produced by a pull request merge, that pull request never uploaded a result (for
+ * example it predates `use_artifacts`, or didn't touch `directory`), `directory` changed on
+ * the main branch since that pull request's own build, or the artifact has expired.
+ */
+function reusePullRequestResult(octokit, repo, token, name, sha, directory) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const pr = yield findMergedPullRequest(octokit, repo, sha);
+        if (!pr) {
+            return null;
+        }
+        if (yield changedSincePullRequest(pr.headSha, sha, directory)) {
+            console.log(`#${pr.number}'s own build is stale: ${directory} changed on the main branch since. Building instead of reusing.`);
+            return null;
+        }
+        try {
+            const artifact = yield findArtifact(octokit, repo, name, candidate => candidate.workflow_run.head_sha === pr.headSha);
+            if (!artifact) {
+                console.log(`No "${name}" artifact found for #${pr.number}'s own build, building instead.`);
+                return null;
+            }
+            const content = yield downloadArtifact(artifact, token, repo);
+            // Validate before trusting it as a substitute for a real build.
+            JSON.parse(content);
+            console.log(`Reusing #${pr.number}'s own size-limit result instead of rebuilding.`);
+            return content;
+        }
+        catch (error) {
+            console.log(`Could not reuse #${pr.number}'s result, building instead.`, error.message);
+            return null;
+        }
+    });
+}
+exports.reusePullRequestResult = reusePullRequestResult;
 
 
 /***/ }),
@@ -122556,11 +122647,31 @@ function run() {
             const octokit = new github_1.GitHub(token);
             const term = new Term_1.default();
             const limit = new SizeLimit_1.default();
-            const { status, output } = yield term.execSizeLimit(null, skipStep, buildScript, cleanScript, windowsVerbatimArguments, directory, script, packageManager);
             // On the main branch there is nothing to compare against and no PR to
             // comment on: the whole point of the run is to leave the results behind for
-            // the pull requests that will branch off it.
+            // the pull requests that will branch off it. If this commit is the merge of a
+            // pull request whose own build already covers this exact result, reuse it
+            // instead of rebuilding from scratch.
             if (isMainBranch) {
+                const reused = useArtifacts
+                    ? yield Artifacts_1.reusePullRequestResult(octokit, repo, token, artifactName, github_1.context.sha, directory)
+                    : null;
+                if (reused !== null) {
+                    let results;
+                    try {
+                        results = JSON.parse(reused);
+                    }
+                    catch (error) {
+                        console.log("Error parsing the reused size-limit output. The output should be a json.");
+                        throw error;
+                    }
+                    yield Artifacts_1.uploadResults(artifactName, reused);
+                    if (results.some(result => result.passed === false)) {
+                        core_1.setFailed("Size limit has been exceeded.");
+                    }
+                    return;
+                }
+                const { status, output } = yield term.execSizeLimit(null, skipStep, buildScript, cleanScript, windowsVerbatimArguments, directory, script, packageManager);
                 try {
                     limit.parseResults(output);
                 }
@@ -122573,6 +122684,12 @@ function run() {
                     core_1.setFailed("Size limit has been exceeded.");
                 }
                 return;
+            }
+            const { status, output } = yield term.execSizeLimit(null, skipStep, buildScript, cleanScript, windowsVerbatimArguments, directory, script, packageManager);
+            if (useArtifacts) {
+                // Stash this pull request's own result so that, if it merges, the main-branch
+                // run can reuse it instead of rebuilding an identical tree from scratch.
+                yield Artifacts_1.uploadResults(artifactName, output);
             }
             let baseOutput = useArtifacts
                 ? yield Artifacts_1.fetchBaseResults(octokit, repo, token, artifactName, mainBranch)
